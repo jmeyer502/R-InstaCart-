@@ -1,0 +1,356 @@
+---
+title: "MKT 309 Project"
+author: "Jerod"
+date: "May 14, 2018"
+output:
+  word_document: default
+  html_document: default
+---
+```{r}
+#load data sets
+
+#Each entity (customer, product, order, aisle, etc.) has an associated unique id. Most of the files and variable names should be self-explanatory.
+aisles <- read.csv("~/SMC/Spring Qtr 18/Marketing/Project/aisles.csv",header=TRUE)
+
+departments <- read.csv("~/SMC/Spring Qtr 18/Marketing/Project/departments.csv",header=TRUE)
+
+#This file tells to which set (prior, train, test) an order belongs. You are predicting reordered items only for the test set orders. 'order_dow' is the day of week.
+orders <- read.csv("~/SMC/Spring Qtr 18/Marketing/Project/orders.csv",header=TRUE)
+
+
+products <- read.csv("~/SMC/Spring Qtr 18/Marketing/Project/products.csv",header=TRUE)
+
+#These files specify which products were purchased in each order. order_products__prior.csv contains previous order contents for all customers. 'reordered' indicates that the customer has a previous order that contains the product. Note that some orders will have no reordered items. You may predict an explicit 'None' value for orders with no reordered items. See the evaluation page for full details.
+orderp <- read.csv("~/SMC/Spring Qtr 18/Marketing/Project/order_products__prior.csv",header=TRUE)
+#train dataset
+ordert <- read.csv("~/SMC/Spring Qtr 18/Marketing/Project/order_products__train.csv",header=TRUE)
+
+
+```
+
+```{r}
+#load packages
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(pastecs)
+library(dummies)
+library(rpart)
+library(rpart.plot)
+```
+
+
+
+```{r}
+# get an understanding of the datasets 
+head(orderp)
+head(products) #
+head(orders)
+head(departments)
+head(aisles)
+head(ordert)
+
+```
+
+
+```{r}
+# MERGE / UPDATE TABLES 
+
+orders <- orders %>% filter(eval_set=="prior")
+
+#currently only merging two datasets due to size limitations. 
+reorder_dataset <- merge(prior_orders,orders, by="order_id")
+
+head(reorder_dataset)
+
+# CREATE SAMPLE SIZE FROM THE DATA
+dcnt_users <- reorder_dataset %>% select (user_id) %>% distinct(user_id)
+train_size <- floor(0.5 * nrow(dcnt_users))
+set.seed(502)
+train_ind <- sample(seq_len(nrow(dcnt_users)), size = train_size) 
+insta_train <- filter(reorder_dataset, user_id %in% train_ind)  
+
+# merge product table for department and aisles
+insta_train <- merge(insta_train, product, by="product_id" )
+
+#remove unnecssary fields to help reduce file's memory footprint
+insta_train <- insta_train %>% select(-product_name,-reorder_flag,-eval_set)
+
+#EXPORT data as csv
+#write.csv(insta_train, file = "insta_train_data.csv")
+
+head(insta_train)
+
+#data_example <- reorder_dataset %>% select(user_id,) %>% filter(user_id == 202279)
+#class(reorder_dataset)
+
+#clean and re arrange the data
+#reorder_dataset <- reorder_dataset %>% mutate(reorder_flag = case_when(reordered == 1 ~ "Yes", reordered == 0 ~ "No"))
+
+#insta_dataset <- reorder_dataset %>% select(user_id, order_id, product_id, add_to_cart_order, reorder_flag, order_number, order_dow, order_hour_of_day, days_since_prior_order)
+
+```
+
+
+
+```{r}
+
+# Summary Variables base on user and aisle
+dcnt_orders.user.aisle <- insta_train %>% group_by(user_id, aisle_id) %>%   summarise(count = n_distinct(order_id))
+colnames(dcnt_orders.user.aisle) <- c("user_id","aisle_id","dcnt_orders.user.aisle")
+
+cnt_products.user.aisle <- aggregate(cbind(count = product_id) ~ user_id + aisle_id ,
+                          data = insta_train,  FUN = function(x){NROW(x)})
+colnames(cnt_products.user.aisle) <- c("user_id","aisle_id","cnt_products.user.aisle")
+
+#cnt_table <- merge(dcnt_orders.user.aisle,cnt_products.user.aisle, by=c("user_id", "aisle_id"))
+
+min_prior_order_days.user.aisle <- aggregate(days_since_prior_order ~ user_id + aisle_id, data = insta_train, FUN = "min")
+colnames(min_prior_order_days.user.aisle) <- c("user_id","aisle_id","min_prior_order_days.user.aisle")
+
+max_prior_order_days.user.aisle <- aggregate(days_since_prior_order ~ user_id + aisle_id, data = insta_train, FUN = "max")
+colnames(max_prior_order_days.user.aisle) <- c("user_id","aisle_id","max_prior_order_days.user.aisle")
+
+mean_prior_order_days.user.aisle <- aggregate(days_since_prior_order ~ user_id + aisle_id, data = insta_train, FUN = "mean")
+colnames(mean_prior_order_days.user.aisle) <- c("user_id","aisle_id","mean_prior_order_days.user.aisle")
+
+nbr_reorders.user.aisle <- aggregate(reordered ~ user_id + aisle_id, data = insta_train, FUN = "sum")
+colnames(nbr_reorders.user.aisle) <- c("user_id","aisle_id","nbr_reorders.user.aisle")
+
+#insta_train <- insta_train %>% select (-dcnt_orders.user.aisle.x, -cnt_products.user.aisle)
+
+
+```
+
+
+
+```{r}
+
+# join the new aggregated data back to the dataset
+#merge data and do a cbind ( cnt_products / dcnt_orders )
+
+insta_train <- left_join(insta_train,dcnt_orders.user.aisle, by = c("user_id" = "user_id", "aisle_id" = "aisle_id"))
+
+insta_train <- left_join(insta_train,cnt_products.user.aisle, by = c("user_id" = "user_id", "aisle_id" = "aisle_id"))
+
+insta_train <- left_join(insta_train,min_prior_order_days.user.aisle, by = c("user_id" = "user_id", "aisle_id" = "aisle_id"))
+
+insta_train <- left_join(insta_train,max_prior_order_days.user.aisle, by = c("user_id" = "user_id", "aisle_id" = "aisle_id"))
+
+insta_train <- left_join(insta_train,mean_prior_order_days.user.aisle, by = c("user_id" = "user_id", "aisle_id" = "aisle_id"))
+
+insta_train <- left_join(insta_train,nbr_reorders.user.aisle, by = c("user_id" = "user_id", "aisle_id" = "aisle_id"))
+insta_train.agg.dedup$aisle_id <- as.factor(insta_train.agg.dedup$aisle_id)
+insta_train.agg.dedup$department_id <- as.factor(insta_train.agg.dedup$department_id)
+insta_train.agg.dedup$user_id <- as.factor(insta_train.agg.dedup$user_id)
+
+```
+
+```{r}
+#data clean up
+#add reorder flag
+insta_train <- mutate(insta_train, reorder_flag=ifelse(nbr_reorders.user.aisle > 0, 1, 0))
+
+#aggregate data based on user and aisle 
+#remove non duplicated fields
+insta_train.agg <- insta_train %>% select(-product_id,-order_id, -order_number, - order_dow, -order_hour_of_day,-days_since_prior_order, - add_to_cart_order, -reordered)
+
+# remove duplicates
+insta_train.agg.dedup <- insta_train.agg %>% distinct
+nrow(insta_train.agg.dedup)
+
+#add order rate
+insta_train.agg.dedup <- mutate(insta_train.agg.dedup, order_rate=cnt_products.user.aisle/dcnt_orders.user.aisle)
+
+#export data
+write.csv(insta_train.agg.dedup, file = "insta_train_dedup_data.csv")
+
+```
+
+#block speparete this section .........................................................................................................
+#block speparete this section .........................................................................................................
+#block speparete this section .........................................................................................................
+#block speparete this section .........................................................................................................
+
+
+```{r}
+#aggregate data
+
+#reorder_summary <- reorder_dataset %>% group_by(user_id) %>% summarise_if(is.numeric,mean,na.rm=TRUE)
+
+#a1
+agg_products_per_order <- aggregate(add_to_cart_order ~ user_id + order_id, data = insta_dataset, FUN = "max")
+
+colnames(agg_products_per_order) <- c("user_id","order_id","products_per_order")
+
+#tc <- aggregate(order_id ~ user_id + product_id, data = a, count)
+#a2
+agg_order_cnt <- aggregate(cbind(count = order_id) ~ user_id + aisle_id ,
+                          data = insta_dataset,  FUN = function(x){NROW(x)})
+
+colnames(agg_order_cnt) <- c("user_id","product_id","order_cnt_per_user_product")
+
+#a3
+agg_order_cnt_per_dow <- aggregate(cbind(count = order_id) ~ user_id + order_dow + product_id,
+                          data = insta_dataset,  FUN = function(x){NROW(x)})
+
+colnames(agg_order_cnt_per_dow) <- c("user_id","order_dow","order_cnt_per_dow")
+
+#a4
+agg_order_cnt_per_hour <- aggregate(cbind(count = order_id) ~ user_id + order_hour_of_day ,
+                          data = insta_dataset,  FUN = function(x){NROW(x)})
+
+colnames(agg_order_cnt_per_hour) <- c("user_id","order_hour_of_day","order_cnt_per_hour")
+
+#a5
+nbr_orders_per_user <- aggregate(order_number ~ user_id, data = insta_dataset, FUN = "max")
+
+colnames(nbr_orders_per_user) <- c("user_id","nbr_orders_per_user")
+
+
+# join the new aggregated data back to the dataset
+#a1
+insta_dataset <- left_join(insta_dataset,agg_products_per_order, by = c("user_id" = "user_id", "order_id" = "order_id"))
+
+#a2
+insta_dataset <- left_join(insta_dataset,agg_order_cnt, by = c("user_id" = "user_id", "product_id" = "product_id"))
+
+#a3
+insta_dataset <- left_join(insta_dataset,agg_order_cnt_per_dow, by = c("user_id" = "user_id", "order_dow" = "order_dow"))
+
+#a4
+insta_dataset <- left_join(insta_dataset,agg_order_cnt_per_hour, by = c("user_id" = "user_id", "order_hour_of_day" = "order_hour_of_day"))
+
+#a5
+insta_dataset <- left_join(insta_dataset,nbr_orders_per_user, by = ("user_id" = "user_id"))
+
+# remove unecessary columns
+insta_dataset <- insta_dataset %>% select(-add_to_cart_order, -order_number)
+
+```
+
+#block speparete this section .........................................................................................................
+#block speparete this section .........................................................................................................
+#block speparete this section .........................................................................................................
+#block speparete this section .........................................................................................................
+
+
+```{r}
+
+# DATA TESTING
+x2<- insta_train %>% filter(user_id == 110 & aisle_id == 1) %>% arrange(order_number)
+x2
+insta_dataset %>% filter(user_id == 110)  %>% arrange(order_number)
+
+
+
+test_data <- insta_dataset %>% filter(user_id == 202279) %>% arrange(desc(user_id) & order_number & desc(product_id))
+
+reorder_users <- insta_dataset %>% select(user_id) group_by 
+
+
+```
+
+#block speparete this section .........................................................................................................
+#block speparete this section .........................................................................................................
+#block speparete this section .........................................................................................................
+#block speparete this section .........................................................................................................
+
+```{r}
+#GENERATE TEST DATA SET
+dcnt_users <- insta_dataset %>% select (user_id) %>% distinct(user_id)
+train_size <- floor(0.6 * nrow(dcnt_users))
+set.seed(502)
+train_ind <- sample(seq_len(nrow(dcnt_users)), size = train_size) 
+insta_train <- filter(insta_dataset, user_id %in% train_ind)  
+train.dcnt.users <- insta_train %>% select (user_id) %>% distinct(user_id)
+```
+#block speparete this section .........................................................................................................
+#block speparete this section .........................................................................................................
+#block speparete this section .........................................................................................................
+#block speparete this section .........................................................................................................
+
+```{r}
+# Decision Tree for reorder point
+library("rpart")
+library("rpart.plot")
+library("gains")
+
+insta.ct <- rpart(reorder_flag ~ min_prior_order_days.user.aisle + max_prior_order_days.user.aisle + mean_prior_order_days.user.aisle + nbr_reorders.user.aisle + dcnt_orders.user.aisle + cnt_products.user.aisle + order_rate, data=insta_train.agg.dedup, method="class", control=rpart.control(minbucket = 15,maxsurrogate = 0))
+
+insta.ct <- rpart(reorder_flag ~ ., data=insta_train.agg.dedup, method="class", control=rpart.control(minbucket = 15,maxsurrogate = 0))
+
+prp(insta.ct)
+
+insta.ct
+
+
+
+```
+
+```{r}
+#logistic regression
+glm.fit = glm(reorder_flag ~  mean_prior_order_days.user.aisle + nbr_reorders.user.aisle  , family = binomial,insta_train.agg.dedup)
+
+summary(glm.fit)
+
+```
+
+
+
+
+```{r}
+#NOTES / OLDER CODE 
+
+#create dummy variables for the departments
+#create dummy variables for the dow 
+#create dummy variables for ... ?
+
+#create summary stats for the different orders / variables 
+# ie orders by DOW , 
+#order_dataset <- merge(prior_orders,product, by= "product_id")
+
+
+#filter(orders, order_dow == 2)
+#class(orders$order_dow)
+
+
+
+reorder_dataset <- merge(prior_orders,orders, by="order_id")
+#dept_dataset <- merge(reorder_dataset, depts, by= "department_id")
+#total_dataset <- merge(dept_dataset, aisles, by= "aisle_id")
+
+head(reorder_dataset)
+
+#clean and re arrange the data
+reorder_dataset <- reorder_dataset %>% mutate(reorder_flag = case_when(reordered == 1 ~ "Yes", reordered == 0 ~ "No"))
+
+ insta_dataset <- reorder_dataset %>% select(user_id, order_id, product_id, add_to_cart_order, reorder_flag, order_number, order_dow, order_hour_of_day, days_since_prior_order)
+
+
+
+
+# create a variable of all 0's to store the categorical heights in
+CatHeight <- rep(0, 725)
+# run through a look, checking each row/value for height
+for (i in 1:725){
+  # if the height of person i is less than 50, then assign a value of "A" to the categorical height for person i
+  if (Height[i]<50){CatHeight[i] <- "A"}
+  # if the height of person i is less than 55 and greater than 50, assign a value of "B" to the categorical height for person i
+  if (Height[i]<55 & Height[i]>=50){CatHeight[i] <- "B"}
+  # same for the rest...
+  if (Height[i]<60 & Height[i]>=55){CatHeight[i] <- "C"}
+  if (Height[i]<65 & Height[i]>=60){CatHeight[i] <- "D"}
+  if (Height[i]<70 & Height[i]>=65){CatHeight[i] <- "E"}
+  if (Height[i]>=70){CatHeight[i] <- "F"}
+}
+# check the heights of the first 5 people
+Height[1:5]
+[1] 62.1 74.7 69.7 71.0 56.9
+# compare to the categorical height of the first 5 people, to make sure that the categories were assigned correctly
+CatHeight[1:5]
+[1] "D" "F" "E" "F" "C"
+
+
+```
+
